@@ -100,7 +100,7 @@ HTML = """
 </style>
 </head>
 <body>
-  <h1>Smart Home</h1>
+  <h1>ClimateOne</h1>
   <div class="sub" id="meta">loading…</div>
 
   <div class="grid">
