@@ -1,9 +1,8 @@
 # app.py
-import glob, io, json, os, sqlite3, threading, time, re
+import subprocess, glob, io, json, os, sqlite3, threading, time, re
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, Response, send_file
 import serial
-import cv2
 
 BAUD = 115200
 PORT_GLOBS = ["/dev/ttyACM*", "/dev/ttyUSB*"]
@@ -395,22 +394,22 @@ def api_history():
         ts.append(r[0]); temp.append(r[1]); hum.append(r[2]); heater.append(r[3]); fan.append(r[4])
     return jsonify({"ts": ts, "temp": temp, "hum": hum, "heater": heater, "fan": fan})
 
+
 @app.route("/snapshot.jpg")
 def snapshot():
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        return jsonify({"ok":False,"error":"camera not available"}), 500
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    time.sleep(0.1)
-    ok, frame = cap.read()
-    cap.release()
-    if not ok:
-        return jsonify({"ok":False,"error":"capture failed"}), 500
-    ok, buf = cv2.imencode(".jpg", frame)
-    if not ok:
-        return jsonify({"ok":False,"error":"encode failed"}), 500
-    return send_file(io.BytesIO(buf.tobytes()), mimetype="image/jpeg", as_attachment=False, download_name="snapshot.jpg")
+    # Change device if needed: add "-d", "/dev/video1"
+    cmd = ["fswebcam", "-q", "-S", "3", "-r", "1280x720", "--no-banner", "-"]  # -S 3 = skip frames for warmup, "-" = stdout
+    try:
+        p = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        jpg = p.stdout
+        if not jpg:
+            return jsonify({"ok": False, "error": "empty capture"}), 500
+        return send_file(io.BytesIO(jpg), mimetype="image/jpeg", as_attachment=False, download_name="snapshot.jpg")
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": "fswebcam error: " + e.stderr.decode(errors="ignore")}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 def main():
     db_init()
