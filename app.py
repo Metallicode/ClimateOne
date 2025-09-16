@@ -4,6 +4,13 @@ from datetime import datetime, timedelta
 from flask import Flask, jsonify, request, Response, send_file
 import serial
 
+
+
+# optional: configure via env vars
+FSWEBCAM_BIN = os.getenv("FSWEBCAM_BIN", "/usr/bin/fswebcam")
+DEFAULT_CAM_DEV = int(os.getenv("CAM_DEV", "0"))  # 0 -> /dev/video0
+
+
 BAUD = 115200
 PORT_GLOBS = ["/dev/ttyACM*", "/dev/ttyUSB*"]
 SER_TIMEOUT = 1.5
@@ -281,7 +288,12 @@ async function saveSetpoints() {
   } catch(e){ console.error(e); }
 }
 
-function snap(){ document.getElementById('img').src = '/snapshot.jpg?t='+Date.now(); }
+
+const CAM_DEV = 0; // set to 1 if your cam is /dev/video1
+function snap() {
+  document.getElementById('img').src = '/snapshot.jpg?dev=' + CAM_DEV + '&t=' + Date.now();
+}
+
 
 async function loadHistory() {
   const r = await fetch('/api/history?minutes=360');
@@ -395,20 +407,50 @@ def api_history():
     return jsonify({"ts": ts, "temp": temp, "hum": hum, "heater": heater, "fan": fan})
 
 
+
+
+def _choose_video_device(preferred_index=None):
+    devs = sorted(glob.glob("/dev/video*"))
+    if not devs:
+        return None
+    if preferred_index is not None:
+        p = "/dev/video{}".format(preferred_index)
+        if p in devs:
+            return p
+    return devs[0]
+
 @app.route("/snapshot.jpg")
 def snapshot():
-    # Change device if needed: add "-d", "/dev/video1"
-    cmd = ["fswebcam", "-q", "-S", "3", "-r", "1280x720", "--no-banner", "-"]  # -S 3 = skip frames for warmup, "-" = stdout
+    # allow override: /snapshot.jpg?dev=1 -> /dev/video1
+    dev_arg = request.args.get("dev")
+    dev_idx = int(dev_arg) if (dev_arg and dev_arg.isdigit()) else DEFAULT_CAM_DEV
+    device = _choose_video_device(dev_idx)
+    if not device:
+        return jsonify({"ok": False, "error": "No /dev/video* devices found"}), 500
+
+    exe = FSWEBCAM_BIN if os.path.exists(FSWEBCAM_BIN) else shutil.which("fswebcam")
+    if not exe:
+        return jsonify({"ok": False, "error": "fswebcam not installed"}), 500
+
+    # try stdout first; some builds don’t support "-" -> fall back to temp file
+    cmd = [exe, "-q", "-d", device, "-S", "3", "-r", "1280x720", "--no-banner", "--save", "-"]
     try:
-        p = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
-        jpg = p.stdout
-        if not jpg:
-            return jsonify({"ok": False, "error": "empty capture"}), 500
-        return send_file(io.BytesIO(jpg), mimetype="image/jpeg", as_attachment=False, download_name="snapshot.jpg")
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True)
+        if p.stdout:
+            return send_file(io.BytesIO(p.stdout), mimetype="image/jpeg", download_name="snapshot.jpg")
+        # fallback to file if stdout empty
+        tmp = "/tmp/snapshot.jpg"
+        cmd_file = [exe, "-q", "-d", device, "-S", "3", "-r", "1280x720", "--no-banner", tmp]
+        p2 = subprocess.run(cmd_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True)
+        return send_file(tmp, mimetype="image/jpeg", download_name="snapshot.jpg")
     except subprocess.CalledProcessError as e:
-        return jsonify({"ok": False, "error": "fswebcam error: " + e.stderr.decode(errors="ignore")}), 500
+        return jsonify({"ok": False, "error": "fswebcam failed", "stderr": e.stderr.decode("utf-8","ignore")}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+
 
 
 def main():
