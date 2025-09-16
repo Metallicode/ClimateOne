@@ -324,21 +324,43 @@ def api_status():
     out["ok"] = True
     return jsonify(out)
 
+
 @app.route("/api/mode/<mode>", methods=["POST"])
 def api_mode(mode):
     mode = mode.upper()
-    if mode not in ("AUTO","MANUAL"):
-        return jsonify({"ok":False,"error":"bad mode"}), 400
-    st = send_cmd(f"MODE,{mode}")
-    return jsonify({"ok": bool(st), **({} if not st else {k:latest[k] for k in ["mode","heater","fan","temp","hum"]})})
+    if mode not in ("AUTO", "MANUAL"):
+        return jsonify({"ok": False, "error": "bad mode"}), 400
+    st = send_cmd("MODE," + mode)
+    d = {"ok": bool(st)}
+    if st:
+        d.update({
+            "mode":   latest.get("mode"),
+            "heater": latest.get("heater"),
+            "fan":    latest.get("fan"),
+            "temp":   latest.get("temp"),
+            "hum":    latest.get("hum"),
+        })
+    return jsonify(d)
+
+
 
 @app.route("/api/set/<dev>/<state>", methods=["POST"])
 def api_set(dev, state):
     dev = dev.lower()
-    if dev not in ("heater","fan"): return jsonify({"ok":False,"error":"bad device"}), 400
-    state = '1' if state=='1' else '0'
-    st = send_cmd(f"SET,{dev},{state}")
-    return jsonify({"ok": bool(st), **({} if not st else {k:latest[k] for k in ["mode","heater","fan","temp","hum"]})})
+    if dev not in ("heater", "fan"):
+        return jsonify({"ok": False, "error": "bad device"}), 400
+    state = '1' if state == '1' else '0'
+    st = send_cmd("SET," + dev + "," + state)
+    d = {"ok": bool(st)}
+    if st:
+        d.update({
+            "mode":   latest.get("mode"),
+            "heater": latest.get("heater"),
+            "fan":    latest.get("fan"),
+            "temp":   latest.get("temp"),
+            "hum":    latest.get("hum"),
+        })
+    return jsonify(d)
 
 @app.route("/api/setpoints", methods=["POST"])
 def api_setpoints():
@@ -346,12 +368,22 @@ def api_setpoints():
     keys = {"temp_on":"temp_on","temp_off":"temp_off","hum_on":"hum_on","hum_off":"hum_off"}
     ok = True
     for k in keys:
-        if k in data and isinstance(data[k], (int,float)):
-            cmd = f"SETPT,{k},{data[k]}"
-            if not send_cmd(cmd): ok = False
+        if k in data and isinstance(data[k], (int, float)):
+            cmd = "SETPT,{},{}".format(k, data[k])
+            if not send_cmd(cmd):
+                ok = False
             time.sleep(0.05)
     st = send_cmd("GET")
-    return jsonify({"ok": ok and bool(st), **({} if not st else {k:latest[k] for k in ["temp_on","temp_off","hum_on","hum_off"]})})
+    d = {"ok": ok and bool(st)}
+    if st:
+        d.update({
+            "temp_on": latest.get("temp_on"),
+            "temp_off": latest.get("temp_off"),
+            "hum_on": latest.get("hum_on"),
+            "hum_off": latest.get("hum_off"),
+        })
+    return jsonify(d)
+
 
 @app.route("/api/history")
 def api_history():
