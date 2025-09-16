@@ -18,11 +18,6 @@
 #define LED_FAN_PIN     A2   // moved off A5 (I2C SCL)
 #define RELAY_FAN_PIN   A3   // moved to keep A4/A5 free for I2C
 
-// ----- Thresholds -----
-const float TEMP_ON_C   = 20.0;  // heater ON below this
-const float TEMP_OFF_C  = 24.0;  // heater OFF at/above this
-const float HUM_ON_RH   = 60.0;  // fan ON at/above this
-const float HUM_OFF_RH  = 60.0;  // fan OFF below this (set 58.0 for hysteresis)
 
 // ----- OLED -----
 #define SCREEN_WIDTH 128
@@ -36,6 +31,90 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DHT dht(DHTPIN, DHTTYPE);
 bool heaterOn = false;
 bool fanOn    = false;
+
+// --- protocol state ---
+bool autoMode = true;  // true=AUTO, false=MANUAL
+
+// ----- Thresholds -----
+float TEMP_ON_C  = 20.0;
+float TEMP_OFF_C = 24.0;
+float HUM_ON_RH  = 60.0;
+float HUM_OFF_RH = 60.0;
+
+// serial input buffer
+String rxLine;
+
+
+
+void sendStatus(float tC, bool tValid, float h, bool hValid) {
+  Serial.print(F("STATUS,temp="));
+  if (tValid) Serial.print(tC, 2); else Serial.print(F("nan"));
+  Serial.print(F(",hum="));
+  if (hValid) Serial.print(h, 2); else Serial.print(F("nan"));
+  Serial.print(F(",heater=")); Serial.print(heaterOn ? 1 : 0);
+  Serial.print(F(",fan="));    Serial.print(fanOn ? 1 : 0);
+  Serial.print(F(",mode="));   Serial.print(autoMode ? F("AUTO") : F("MANUAL"));
+  Serial.print(F(",temp_on="));  Serial.print(TEMP_ON_C, 2);
+  Serial.print(F(",temp_off=")); Serial.print(TEMP_OFF_C, 2);
+  Serial.print(F(",hum_on="));   Serial.print(HUM_ON_RH, 2);
+  Serial.print(F(",hum_off="));  Serial.println(HUM_OFF_RH, 2);
+}
+
+void handleCommand(const String &line, float tC, bool tValid, float h, bool hValid) {
+  // Commands:
+  // GET
+  // MODE,AUTO|MANUAL
+  // SET,heater,0|1
+  // SET,fan,0|1
+  // SETPT,<name>,<value>   (temp_on,temp_off,hum_on,hum_off)
+
+  if (line.equalsIgnoreCase(F("GET"))) {
+    sendStatus(tC, tValid, h, hValid);
+    return;
+  }
+
+  if (line.startsWith(F("MODE,"))) {
+    String m = line.substring(5); m.trim(); m.toUpperCase();
+    if (m == F("AUTO"))   autoMode = true;
+    if (m == F("MANUAL")) autoMode = false;
+    sendStatus(tC, tValid, h, hValid);
+    return;
+  }
+
+  if (line.startsWith(F("SET,"))) {
+    // SET,heater,1
+    int c1 = line.indexOf(',', 4);
+    if (c1 > 0) {
+      String dev = line.substring(4, c1); dev.toLowerCase();
+      String val = line.substring(c1 + 1); val.trim();
+      bool on = (val == F("1"));
+      if (dev == F("heater")) heaterOn = on;
+      if (dev == F("fan"))    fanOn = on;
+      autoMode = false; // switch to MANUAL when a SET occurs
+      applyOutputs();
+      sendStatus(tC, tValid, h, hValid);
+    }
+    return;
+  }
+
+  if (line.startsWith(F("SETPT,"))) {
+    // SETPT,temp_on,19.5
+    int c1 = line.indexOf(',', 6);
+    if (c1 > 0) {
+      String name = line.substring(6, c1); name.toLowerCase();
+      String sval = line.substring(c1 + 1); sval.trim();
+      float v = sval.toFloat();
+      if (name == F("temp_on"))  TEMP_ON_C  = v;
+      if (name == F("temp_off")) TEMP_OFF_C = v;
+      if (name == F("hum_on"))   HUM_ON_RH  = v;
+      if (name == F("hum_off"))  HUM_OFF_RH = v;
+      sendStatus(tC, tValid, h, hValid);
+    }
+    return;
+  }
+}
+
+
 
 void applyOutputs() {
   // Invert RELAY_* writes here if your relays are active-LOW
@@ -123,15 +202,21 @@ void loop() {
   bool tValid = !isnan(tC);
   bool hValid = !isnan(h);
 
-  if (tValid) {
-    if (!heaterOn && tC < TEMP_ON_C)   heaterOn = true;
-    if (heaterOn  && tC >= TEMP_OFF_C) heaterOn = false;
+  // --- control logic ---
+  if (autoMode) {
+    // temperature hysteresis
+    if (!isnan(tC)) {
+      if (!heaterOn && tC < TEMP_ON_C)   heaterOn = true;
+      if (heaterOn  && tC >= TEMP_OFF_C) heaterOn = false;
+    }
+    // humidity threshold
+    if (!isnan(h)) {
+      if (!fanOn && h >= HUM_ON_RH) fanOn = true;
+      if (fanOn  && h < HUM_OFF_RH) fanOn = false;
+    }
   }
-  if (hValid) {
-    if (!fanOn && h >= HUM_ON_RH) fanOn = true;
-    if (fanOn  && h < HUM_OFF_RH) fanOn = false;
-  }
-
+  // if MANUAL, heaterOn/fanOn are only changed by SET commands
+  
   applyOutputs();
 
   Serial.print(F("Temp C: "));
@@ -144,6 +229,18 @@ void loop() {
   Serial.println(fanOn ? F("ON") : F("OFF"));
 
   if (display.width() > 0) oledShow(tC, tValid, h, hValid);
+
+  while (Serial.available()) {
+  char c = (char)Serial.read();
+  if (c == '\n' || c == '\r') {
+    if (rxLine.length()) {
+      handleCommand(rxLine, tC, tValid, h, hValid);
+      rxLine = "";
+    }
+  } else {
+    if (rxLine.length() < 200) rxLine += c;
+  }
+}
 
   delay(2000);
 }
