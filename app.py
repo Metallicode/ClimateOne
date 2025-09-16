@@ -19,6 +19,15 @@ LOCK = threading.Lock()
 DB_PATH = "smarthome.db"
 POLL_INTERVAL = 10  # seconds
 
+
+SNAPSHOT_DIR = os.path.expanduser("~/ClimateOne/snaps")
+SNAPSHOT_FILE = os.path.join(SNAPSHOT_DIR, "latest.jpg")
+if not os.path.isdir(SNAPSHOT_DIR):
+    try:
+        os.makedirs(SNAPSHOT_DIR)
+    except Exception:
+        pass  # ok if created concurrently
+
 app = Flask(__name__)
 
 # ---- serial helpers ----
@@ -289,11 +298,18 @@ async function saveSetpoints() {
 }
 
 
-const CAM_DEV = 0; // set to 1 if your cam is /dev/video1
-function snap() {
-  document.getElementById('img').src = '/snapshot.jpg?dev=' + CAM_DEV + '&t=' + Date.now();
-}
+var CAM_DEV = 0; // set to 1 if your camera is /dev/video1
 
+async function snap() {
+  try {
+    // Trigger a new capture (this also saves latest.jpg server-side)
+    await fetch('/snapshot.jpg?dev=' + CAM_DEV + '&t=' + Date.now());
+    // Now display the saved copy (bust cache with ts)
+    document.getElementById('img').src = '/latest.jpg?t=' + Date.now();
+  } catch(e) {
+    console.error(e);
+  }
+}
 
 async function loadHistory() {
   const r = await fetch('/api/history?minutes=360');
@@ -421,34 +437,45 @@ def _choose_video_device(preferred_index=None):
 
 @app.route("/snapshot.jpg")
 def snapshot():
-    # allow override: /snapshot.jpg?dev=1 -> /dev/video1
+    # allow override: /snapshot.jpg?dev=1  -> /dev/video1
     dev_arg = request.args.get("dev")
-    dev_idx = int(dev_arg) if (dev_arg and dev_arg.isdigit()) else DEFAULT_CAM_DEV
+    dev_idx = int(dev_arg) if (dev_arg and dev_arg.isdigit()) else 0
     device = _choose_video_device(dev_idx)
     if not device:
         return jsonify({"ok": False, "error": "No /dev/video* devices found"}), 500
 
-    exe = FSWEBCAM_BIN if os.path.exists(FSWEBCAM_BIN) else shutil.which("fswebcam")
+    exe = "/usr/bin/fswebcam" if os.path.exists("/usr/bin/fswebcam") else shutil.which("fswebcam")
     if not exe:
         return jsonify({"ok": False, "error": "fswebcam not installed"}), 500
 
-    # try stdout first; some builds don’t support "-" -> fall back to temp file
+    # First try stdout; if empty, fall back to a temp file
     cmd = [exe, "-q", "-d", device, "-S", "3", "-r", "1280x720", "--no-banner", "--save", "-"]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True)
-        if p.stdout:
-            return send_file(io.BytesIO(p.stdout), mimetype="image/jpeg", download_name="snapshot.jpg")
-        # fallback to file if stdout empty
-        tmp = "/tmp/snapshot.jpg"
-        cmd_file = [exe, "-q", "-d", device, "-S", "3", "-r", "1280x720", "--no-banner", tmp]
-        p2 = subprocess.run(cmd_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True)
-        return send_file(tmp, mimetype="image/jpeg", download_name="snapshot.jpg")
+        jpg = p.stdout
+        if not jpg:
+            tmp = "/tmp/_smarthome_snapshot.jpg"
+            cmd2 = [exe, "-q", "-d", device, "-S", "3", "-r", "1280x720", "--no-banner", tmp]
+            p2 = subprocess.run(cmd2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, check=True)
+            with open(tmp, "rb") as f:
+                jpg = f.read()
+        # Save a copy we can serve later
+        try:
+            with open(SNAPSHOT_FILE, "wb") as f:
+                f.write(jpg)
+        except Exception:
+            pass
+        return send_file(io.BytesIO(jpg), mimetype="image/jpeg")
     except subprocess.CalledProcessError as e:
         return jsonify({"ok": False, "error": "fswebcam failed", "stderr": e.stderr.decode("utf-8","ignore")}), 500
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
+@app.route("/latest.jpg")
+def latest_jpg():
+    if not os.path.exists(SNAPSHOT_FILE):
+        return jsonify({"ok": False, "error": "No snapshot yet"}), 404
+    return send_file(SNAPSHOT_FILE, mimetype="image/jpeg")
 
 
 
